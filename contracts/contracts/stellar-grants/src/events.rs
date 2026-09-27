@@ -1593,6 +1593,14 @@ pub struct WhitelistAddressRemoved {
     pub timestamp: u64,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WhitelistModeChanged {
+    pub scope: crate::types::WhitelistScope,
+    pub mode: crate::types::WhitelistMode,
+    pub timestamp: u64,
+}
+
 impl Events {
     pub fn emit_public_review_submitted(
         env: &Env,
@@ -1726,6 +1734,19 @@ impl Events {
         let event = WhitelistAddressRemoved {
             address,
             scope,
+            timestamp: env.ledger().timestamp(),
+        };
+        event.publish(env);
+    }
+
+    pub fn emit_whitelist_mode_changed(
+        env: &Env,
+        scope: crate::types::WhitelistScope,
+        mode: crate::types::WhitelistMode,
+    ) {
+        let event = WhitelistModeChanged {
+            scope,
+            mode,
             timestamp: env.ledger().timestamp(),
         };
         event.publish(env);
