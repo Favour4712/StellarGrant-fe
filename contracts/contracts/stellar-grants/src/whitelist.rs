@@ -1,5 +1,6 @@
 use soroban_sdk::{Address, Env, Vec};
 
+use crate::constants::MAX_WHITELIST_ENTRIES_PER_SCOPE;
 use crate::errors::ContractError;
 use crate::events::Events;
 use crate::storage::Storage;
@@ -22,6 +23,12 @@ pub fn add(
     // Check if already whitelisted.
     if is_allowed_exact(env, address, scope) {
         return Err(ContractError::AlreadyRegistered);
+    }
+
+    // Enforce cap on entries per scope.
+    let entries = Storage::get_whitelist_entries(env, scope);
+    if entries.len() >= MAX_WHITELIST_ENTRIES_PER_SCOPE as u32 {
+        return Err(ContractError::InvalidInput);
     }
 
     let entry = WhitelistEntry {
@@ -110,7 +117,8 @@ pub fn set_mode(
         }
     }
 
-    Storage::set_whitelist_mode(env, scope, mode);
+    Storage::set_whitelist_mode(env, scope, mode.clone());
+    Events::emit_whitelist_mode_changed(env, scope.clone(), mode);
     Ok(())
 }
 
@@ -310,6 +318,57 @@ mod tests {
             // Grant owner can add to per-grant scope even without global admin.
             add(&env, &owner, &addr, &scope).unwrap();
             assert!(is_allowed(&env, &addr, &scope));
+        });
+    }
+
+    #[test]
+    fn test_whitelist_entry_cap_enforced() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let admin = Address::generate(&env);
+            let scope = WhitelistScope::GlobalReviewer;
+
+            Storage::set_global_admin(&env, &admin);
+            set_mode(&env, &admin, &scope, WhitelistMode::Restricted).unwrap();
+
+            // Add entries up to the cap.
+            for _ in 0..MAX_WHITELIST_ENTRIES_PER_SCOPE {
+                let addr = Address::generate(&env);
+                add(&env, &admin, &addr, &scope).unwrap();
+            }
+
+            // Adding one more should fail.
+            let extra_addr = Address::generate(&env);
+            assert_eq!(
+                add(&env, &admin, &extra_addr, &scope),
+                Err(ContractError::InvalidInput)
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_mode_emits_event() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let admin = Address::generate(&env);
+            let scope = WhitelistScope::GlobalReviewer;
+
+            Storage::set_global_admin(&env, &admin);
+
+            // Set mode to Restricted and verify event is emitted.
+            set_mode(&env, &admin, &scope, WhitelistMode::Restricted).unwrap();
+
+            let events = env.events().all();
+            assert_eq!(events.len(), 1);
+            let event = events.first().unwrap();
+            assert_eq!(
+                event.topic,
+                soroban_sdk::xdr::ScVal::from(soroban_sdk::Symbol::short("whitelist_mode_changed"))
+            );
         });
     }
 }
