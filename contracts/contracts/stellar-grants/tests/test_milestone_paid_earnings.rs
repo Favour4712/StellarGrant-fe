@@ -72,8 +72,12 @@ fn test_paid_milestone_reflects_in_portfolio_earnings() {
 
     client.milestone_vote(&grant_id, &0, &reviewer, &true, &None);
 
-    // Before grant_complete runs the real payout, portfolio earnings must
-    // still be zero — Approved alone does not mean paid.
+    // Approved milestones count toward progress, but not earned funds until
+    // grant_complete runs the real payout.
+    let summary = client.portfolio_grant_summary(&owner, &grant_id);
+    assert_eq!(summary.milestones_completed, 1);
+    assert_eq!(summary.total_earned, 0);
+
     let earnings_before = client.portfolio_earnings_by_token(&owner);
     assert_eq!(
         earnings_before.len(),
