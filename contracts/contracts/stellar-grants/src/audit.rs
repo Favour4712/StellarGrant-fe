@@ -25,9 +25,9 @@ pub fn log(
     Storage::append_audit_entry(env, grant_id, &entry);
 }
 
-/// Return the full audit log for a grant.
-pub fn get_log(env: &Env, grant_id: u64) -> Vec<AuditEntry> {
-    Storage::get_audit_log(env, grant_id)
+/// Return one bounded page of the audit log for a grant.
+pub fn get_log(env: &Env, grant_id: u64, offset: u32, limit: u32) -> Vec<AuditEntry> {
+    Storage::get_audit_log_page(env, grant_id, offset, limit)
 }
 
 pub fn get_audit_log(env: &Env, grant_id: u64) -> Vec<AuditEntry> {
@@ -54,7 +54,12 @@ pub fn log_length(env: &Env, grant_id: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::MAX_PAGE_SIZE;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env};
+
+    fn get_log(env: &Env, grant_id: u64) -> Vec<AuditEntry> {
+        super::get_log(env, grant_id, 0, MAX_PAGE_SIZE)
+    }
 
     fn set_ledger(env: &Env, sequence: u32, timestamp: u64) {
         env.ledger().set(soroban_sdk::testutils::LedgerInfo {
@@ -451,5 +456,30 @@ mod tests {
             recent.get(1).unwrap().action,
             AuditAction::MilestoneApproved
         );
+    }
+
+    #[test]
+    fn get_log_returns_bounded_page() {
+        let (env, actor, grant_id) = setup();
+        let contract_id = env.register(crate::StellarGrantsContract, ());
+        env.as_contract(&contract_id, || {
+            for sequence in 1..=60 {
+                set_ledger(&env, sequence, sequence as u64);
+                log(
+                    &env,
+                    grant_id,
+                    AuditAction::GrantFunded,
+                    &actor,
+                    None,
+                    Some(sequence as i128),
+                );
+            }
+
+            let page = super::get_log(&env, grant_id, 45, 20);
+
+            assert_eq!(page.len(), 15);
+            assert_eq!(page.get(0).unwrap().ledger_sequence, 46);
+            assert_eq!(page.get(14).unwrap().ledger_sequence, 60);
+        });
     }
 }
