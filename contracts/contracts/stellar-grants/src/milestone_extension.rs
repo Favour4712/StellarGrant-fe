@@ -405,7 +405,10 @@ mod tests {
         let status = vote_extension(&env, &r1, 1, 0, true).unwrap();
         assert_eq!(status, ExtensionStatus::Pending); // Not yet majority
         let events_after_vote = env.events().all();
-        assert_eq!(events_after_vote.events().len(), event_count_before_vote + 1);
+        assert_eq!(
+            events_after_vote.events().len(),
+            event_count_before_vote + 1
+        );
         assert!(events_after_vote
             .events()
             .iter()
