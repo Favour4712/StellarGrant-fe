@@ -343,7 +343,7 @@ mod tests {
                 None,
             );
 
-            let log = audit::get_log(&env, grant_id);
+            let log = audit::get_log(&env, grant_id, 0, 50);
             assert_eq!(log.len(), 3);
             assert_eq!(log.get(0).unwrap().action, AuditAction::GrantCreated);
             assert_eq!(log.get(1).unwrap().action, AuditAction::GrantFunded);
@@ -440,7 +440,7 @@ mod tests {
             &Vec::new(&env),
         );
 
-        let log = client.get_audit_log(&grant_id);
+        let log = client.get_audit_log(&grant_id, &0, &50);
         assert_eq!(log.len(), 1);
         assert_eq!(log.get(0).unwrap().action, AuditAction::GrantCreated);
         assert_eq!(log.get(0).unwrap().actor, owner);
@@ -466,7 +466,7 @@ mod tests {
 
         client.milestone_vote(&grant_id, &0, &reviewer, &true, &None);
 
-        let log = client.get_audit_log(&grant_id);
+        let log = client.get_audit_log(&grant_id, &0, &50);
         assert_eq!(log.len(), 1);
         assert_eq!(log.get(0).unwrap().action, AuditAction::MilestoneApproved);
     }
@@ -975,7 +975,7 @@ mod tests {
 
         // The auto-approved milestone must leave the same audit trail and mint
         // the same completion NFT a manual approval would.
-        let log = client.get_audit_log(&grant_id);
+        let log = client.get_audit_log(&grant_id, &0, &50);
         assert!(log
             .iter()
             .any(|entry| entry.action == AuditAction::MilestoneApproved));

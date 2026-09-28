@@ -1067,9 +1067,9 @@ impl StellarGrantsContract {
         Ok(milestone.reasons)
     }
 
-    /// Return the full immutable audit log for a grant.
-    pub fn get_audit_log(env: Env, grant_id: u64) -> Vec<AuditEntry> {
-        audit::get_log(&env, grant_id)
+    /// Return one bounded page of the immutable audit log for a grant.
+    pub fn get_audit_log(env: Env, grant_id: u64, offset: u32, limit: u32) -> Vec<AuditEntry> {
+        audit::get_log(&env, grant_id, offset, limit)
     }
 
     // ── Contract Version Query (#527) ───────────────────────────────────

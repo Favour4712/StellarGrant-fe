@@ -392,6 +392,65 @@ impl Storage {
         full_log
     }
 
+    pub fn get_audit_log_page(
+        env: &Env,
+        grant_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<AuditEntry> {
+        let mut result = Vec::new(env);
+        let effective_limit = core::cmp::min(limit, crate::constants::MAX_PAGE_SIZE);
+        if effective_limit == 0 {
+            return result;
+        }
+
+        let legacy_key = DataKey::Grant(GrantKey::AuditLog(grant_id));
+        let legacy_log = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<AuditEntry>>(&legacy_key);
+        let legacy_len = legacy_log.as_ref().map(Vec::len).unwrap_or(0);
+        if let Some(log) = legacy_log {
+            let start = core::cmp::min(offset, legacy_len);
+            let end = core::cmp::min(start.saturating_add(effective_limit), legacy_len);
+            for index in start..end {
+                if let Some(entry) = log.get(index) {
+                    result.push_back(entry);
+                }
+            }
+        }
+
+        if result.len() == effective_limit {
+            return result;
+        }
+
+        let shard_offset = offset.saturating_sub(legacy_len);
+        let mut page_num = shard_offset / Self::MAX_ENTRIES_PER_PAGE;
+        let mut page_index = shard_offset % Self::MAX_ENTRIES_PER_PAGE;
+        let page_count_key = DataKey::Grant(GrantKey::AuditLogPageCount(grant_id));
+        let page_count: u32 = env.storage().persistent().get(&page_count_key).unwrap_or(0);
+
+        while page_num <= page_count && result.len() < effective_limit {
+            let page_key = DataKey::Grant(GrantKey::AuditLogPage(grant_id, page_num));
+            if let Some(page) = env
+                .storage()
+                .persistent()
+                .get::<_, Vec<AuditEntry>>(&page_key)
+            {
+                while page_index < page.len() && result.len() < effective_limit {
+                    if let Some(entry) = page.get(page_index) {
+                        result.push_back(entry);
+                    }
+                    page_index += 1;
+                }
+            }
+            page_num += 1;
+            page_index = 0;
+        }
+
+        result
+    }
+
     pub fn append_audit_entry(env: &Env, grant_id: u64, entry: &AuditEntry) {
         let page_count_key = DataKey::Grant(GrantKey::AuditLogPageCount(grant_id));
         let mut page_num: u32 = env.storage().persistent().get(&page_count_key).unwrap_or(0);

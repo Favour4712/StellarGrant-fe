@@ -29,13 +29,12 @@ pub fn export_grants(
         .get(&global_order_key)
         .unwrap_or_else(|| Vec::new(env));
 
-    let scan_limit = core::cmp::min(MAX_GRANTS_PER_SCAN, all_ids.len() as u32) as usize;
+    let start = core::cmp::min(offset, all_ids.len());
+    let scan_limit = core::cmp::min(MAX_GRANTS_PER_SCAN, all_ids.len().saturating_sub(start));
+    let scan_end = start.saturating_add(scan_limit);
     let mut filtered = soroban_sdk::Vec::new(env);
-    for i in 0..scan_limit {
-        if i >= all_ids.len() as usize {
-            break;
-        }
-        let gid = all_ids.get(i as u32).unwrap();
+    for i in start..scan_end {
+        let gid = all_ids.get(i).unwrap();
         let last_updated = get_last_updated(env, gid);
         if let Some(after) = last_updated_after {
             if last_updated <= after {
@@ -48,7 +47,7 @@ pub fn export_grants(
     let total_filtered: u32 = filtered.len();
     let mut page_items = soroban_sdk::Vec::new(env);
     let mut count = 0u32;
-    let mut i = offset;
+    let mut i = 0;
     while i < filtered.len() && count < capped {
         let gid = filtered.get(i).unwrap();
         if let Some(grant) = Storage::get_grant(env, gid) {
@@ -72,7 +71,7 @@ pub fn export_grants(
         i += 1;
     }
 
-    let has_more = offset.saturating_add(capped) < total_filtered;
+    let has_more = scan_end < all_ids.len() || total_filtered > capped;
 
     ExportGrantPage {
         items: page_items,
@@ -135,13 +134,12 @@ pub fn export_milestones_since(
         .unwrap_or_else(|| Vec::new(env));
 
     let mut all_milestones = soroban_sdk::Vec::new(env);
-    let scan_limit = core::cmp::min(MAX_GRANTS_PER_SCAN, all_ids.len() as u32) as usize;
+    let start = core::cmp::min(offset, all_ids.len());
+    let scan_limit = core::cmp::min(MAX_GRANTS_PER_SCAN, all_ids.len().saturating_sub(start));
+    let scan_end = start.saturating_add(scan_limit);
 
-    for i in 0..scan_limit {
-        if i >= all_ids.len() as usize {
-            break;
-        }
-        let gid = all_ids.get(i as u32).unwrap();
+    for i in start..scan_end {
+        let gid = all_ids.get(i).unwrap();
         if let Some(grant) = Storage::get_grant(env, gid) {
             for idx in 0..grant.total_milestones {
                 if let Some(milestone) = Storage::get_milestone(env, gid, idx) {
@@ -181,14 +179,14 @@ pub fn export_milestones_since(
     let total = all_milestones.len();
     let mut page_items = soroban_sdk::Vec::new(env);
     let mut count = 0u32;
-    let mut i = offset;
+    let mut i = 0;
     while i < all_milestones.len() && count < capped {
         page_items.push_back(all_milestones.get(i).unwrap());
         count += 1;
         i += 1;
     }
 
-    let has_more = offset.saturating_add(capped) < total;
+    let has_more = scan_end < all_ids.len() || total > capped;
 
     ExportMilestonePage {
         items: page_items,
@@ -363,6 +361,33 @@ mod tests {
         assert!(result.has_more);
     }
 
+    #[test]
+    fn test_export_grants_scans_from_offset_past_scan_limit() {
+        let (env, owner) = setup();
+        let contract_id = env.register(crate::StellarGrantsContract, ());
+        env.as_contract(&contract_id, || {
+            let grant_count = MAX_GRANTS_PER_SCAN + 5;
+            let mut ids = soroban_sdk::Vec::new(&env);
+            for id in 1..=grant_count as u64 {
+                ids.push_back(id);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Grant(GrantKey::GlobalOrder), &ids);
+
+            let grant_id = MAX_GRANTS_PER_SCAN as u64 + 1;
+            let mut grant = make_grant(&env, &owner);
+            grant.id = grant_id;
+            Storage::set_grant(&env, grant_id, &grant);
+
+            let result = export_grants(&env, MAX_GRANTS_PER_SCAN, 10, None);
+
+            assert_eq!(result.items.len(), 1);
+            assert_eq!(result.items.get(0).unwrap().id, grant_id);
+            assert!(!result.has_more);
+        });
+    }
+
     // Regression test for issue #886, `export_milestones_since` half.
     // A real grant/milestone placed right at the scan boundary
     // (id == MAX_GRANTS_PER_SCAN) must be counted; one placed just past it
@@ -409,5 +434,53 @@ mod tests {
 
         let result = export_milestones_since(&env, 0, 0, 50);
         assert_eq!(result.total, 1);
+    }
+
+    #[test]
+    fn test_export_milestones_since_scans_from_offset_past_scan_limit() {
+        let (env, owner) = setup();
+        let contract_id = env.register(crate::StellarGrantsContract, ());
+        env.as_contract(&contract_id, || {
+            let grant_count = MAX_GRANTS_PER_SCAN + 5;
+            let mut ids = soroban_sdk::Vec::new(&env);
+            for id in 1..=grant_count as u64 {
+                ids.push_back(id);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Grant(GrantKey::GlobalOrder), &ids);
+
+            let grant_id = MAX_GRANTS_PER_SCAN as u64 + 1;
+            let mut grant = make_grant(&env, &owner);
+            grant.id = grant_id;
+            Storage::set_grant(&env, grant_id, &grant);
+            Storage::set_milestone(
+                &env,
+                grant_id,
+                0,
+                &crate::types::Milestone {
+                    idx: 0,
+                    description: soroban_sdk::String::from_str(&env, "m"),
+                    amount: 100,
+                    state: crate::types::MilestoneState::Submitted,
+                    votes: soroban_sdk::Map::new(&env),
+                    approvals: 0,
+                    rejections: 0,
+                    reasons: soroban_sdk::Map::new(&env),
+                    status_updated_at: 1,
+                    proof_url: None,
+                    submission_timestamp: 1,
+                    deadline: None,
+                    reviewer_count_snapshot: 0,
+                    reviewer_list_snapshot: soroban_sdk::Vec::new(&env),
+                },
+            );
+
+            let result = export_milestones_since(&env, 0, MAX_GRANTS_PER_SCAN, 10);
+
+            assert_eq!(result.items.len(), 1);
+            assert_eq!(result.items.get(0).unwrap().grant_id, grant_id);
+            assert!(!result.has_more);
+        });
     }
 }

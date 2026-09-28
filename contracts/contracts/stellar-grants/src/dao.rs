@@ -49,6 +49,11 @@ pub fn create_proposal(
     description: String,
     proposal_type: DaoProposalType,
 ) -> Result<u64, ContractError> {
+    proposer.require_auth();
+    if Storage::get_reviewer_reputation(env, proposer.clone()) == 0 {
+        return Err(ContractError::Unauthorized);
+    }
+
     if title.is_empty() || title.len() > MAX_DAO_TITLE_LEN {
         return Err(ContractError::InvalidInput);
     }
@@ -266,6 +271,24 @@ mod tests {
                 DaoProposalType::Generic,
             );
             assert_eq!(result, Err(ContractError::InvalidInput));
+        });
+    }
+
+    #[test]
+    fn test_create_proposal_zero_reputation_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        with_contract(&env, || {
+            let proposer = Address::generate(&env);
+            Storage::set_reviewer_reputation(&env, proposer.clone(), 0);
+            let result = create_proposal(
+                &env,
+                &proposer,
+                String::from_str(&env, "Proposal"),
+                String::from_str(&env, "desc"),
+                DaoProposalType::Generic,
+            );
+            assert_eq!(result, Err(ContractError::Unauthorized));
         });
     }
 
