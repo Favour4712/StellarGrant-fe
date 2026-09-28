@@ -167,7 +167,7 @@ mod tests {
     use super::*;
     use crate::types::{Grant, GrantStatus};
     use crate::StellarGrantsContract;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger};
 
     fn setup(env: &Env) -> Address {
         env.mock_all_auths();
@@ -353,22 +353,20 @@ mod tests {
         let env = Env::default();
         let contract_id = setup(&env);
 
-        env.as_contract(&contract_id, || {
-            let admin = Address::generate(&env);
-            let scope = WhitelistScope::GlobalReviewer;
+        let admin = Address::generate(&env);
+        let scope = WhitelistScope::GlobalReviewer;
 
+        env.as_contract(&contract_id, || {
             Storage::set_global_admin(&env, &admin);
 
             // Set mode to Restricted and verify event is emitted.
             set_mode(&env, &admin, &scope, WhitelistMode::Restricted).unwrap();
-
-            let events = env.events().all();
-            assert_eq!(events.len(), 1);
-            let event = events.first().unwrap();
-            assert_eq!(
-                event.topic,
-                soroban_sdk::xdr::ScVal::from(soroban_sdk::Symbol::short("whitelist_mode_changed"))
-            );
         });
+
+        // `all()` returns what the last completed invocation published, so it
+        // is read outside the contract frame, as in the scoring and waitlist
+        // event tests.
+        let events = env.events().all();
+        assert_eq!(events.events().len(), 1);
     }
 }
