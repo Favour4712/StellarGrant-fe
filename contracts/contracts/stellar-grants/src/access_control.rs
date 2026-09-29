@@ -117,6 +117,12 @@ pub fn revoke_role(
         return Err(ContractError::Unauthorized);
     }
 
+    // Issue #901: revoking a role the holder does not have is a no-op and must
+    // not emit a misleading RoleRevoked event.
+    if !has_role(env, holder, role.clone()) {
+        return Err(ContractError::InvalidState);
+    }
+
     // Mark assignment as inactive
     if let Some(mut assignment) = Storage::get_role_assignment(env, holder, &role) {
         assignment.is_active = false;
@@ -235,7 +241,9 @@ pub fn renounce_role(env: &Env, holder: &Address, role: Role) -> Result<(), Cont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env};
+    use soroban_sdk::{
+        testutils::Address as _, testutils::Events as _, testutils::Ledger as _, Address, Env,
+    };
 
     fn set_ledger(env: &Env, sequence: u32, timestamp: u64) {
         env.ledger().set(soroban_sdk::testutils::LedgerInfo {
@@ -439,6 +447,19 @@ mod tests {
             revoke_role(&env, &admin, &alice, Role::TreasuryManager).unwrap();
             assert!(!has_role(&env, &alice, Role::TreasuryManager));
         });
+    }
+
+    // Issue #901
+    #[test]
+    fn revoke_role_errors_when_holder_lacks_role() {
+        let (env, admin, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            let alice = Address::generate(&env);
+            let err = revoke_role(&env, &admin, &alice, Role::TreasuryManager);
+            assert_eq!(err, Err(ContractError::InvalidState));
+        });
+        // No RoleRevoked event may be emitted for the no-op attempt.
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]

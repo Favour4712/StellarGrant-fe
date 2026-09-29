@@ -5009,6 +5009,11 @@ fn apply_milestone_submission(
         {
             return Err(ContractError::MilestoneAlreadySubmitted);
         }
+        // Issue #898: a resubmission after rejection must not inherit the
+        // checklist approval given to the previous, rejected work.
+        if existing.state == MilestoneState::Rejected {
+            checklist::clear_submission(env, grant_id, milestone_idx);
+        }
     }
 
     // Check milestone dependencies: all previous milestones must be approved
