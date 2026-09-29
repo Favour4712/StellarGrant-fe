@@ -3,9 +3,9 @@ mod tests {
     use crate::audit;
     use crate::storage::Storage;
     use crate::types::{
-        AmendmentStatus, AuditAction, AutoApproveConfig, ChainId, ContractError,
-        EscrowLifecycleState, Grant, GrantFund, GrantStatus, Milestone, MilestoneState,
-        PublicReviewSignal, VotingMechanism,
+        AmendmentStatus, AuditAction, AutoApproveConfig, BatchMilestoneVote, ChainId,
+        ContractError, EscrowLifecycleState, Grant, GrantFund, GrantStatus, Milestone,
+        MilestoneState, PublicReviewSignal, VotingMechanism,
     };
     use crate::StellarGrantsContract;
     use crate::StellarGrantsContractClient;
@@ -719,8 +719,10 @@ mod tests {
         let result = client.try_execute_escrow_release(&grant_id, &0);
         assert_eq!(result, Err(Ok(ContractError::Unauthorized.into())));
 
-        let approver = Address::generate(&env);
-        client.approve_escrow_release(&approver, &grant_id, &0);
+        // Issue #892: escrow_multisig::approve requires the caller be the
+        // grant's owner, a registered reviewer, or the admin — use the
+        // grant's own reviewer rather than an unrelated throwaway address.
+        client.approve_escrow_release(&reviewer, &grant_id, &0);
         client.execute_escrow_release(&grant_id, &0);
 
         // Only now should the recipient actually hold the funds and the
@@ -1062,5 +1064,144 @@ mod tests {
         let reason = String::from_str(&env, "cancel");
         let result = client.try_cancel_grant(&paused_grant, &owner, &reason);
         assert_eq!(result, Err(Ok(ContractError::ContractPaused.into())));
+    }
+
+    // ── Issue #890: cancel_grant must not drain escrow mid-dispute ──────────
+
+    #[test]
+    fn test_cancel_grant_blocked_while_dispute_open() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, contract_id) = setup_test(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_id = token_contract.address();
+        let token_admin = token::StellarAssetClient::new(&env, &token_id);
+
+        let owner = Address::generate(&env);
+        let funder = Address::generate(&env);
+        token_admin.mint(&funder, &1000);
+
+        let grant_id = create_client_grant(&env, &client, &owner, &token_id, Vec::new(&env));
+        client.grant_fund(&grant_id, &funder, &1000);
+
+        // Raise a dispute on milestone 0 — this locks escrow without changing
+        // grant.status, which is the exact gap cancel_grant used to fall through.
+        env.as_contract(&contract_id, || {
+            let grant = Storage::get_grant(&env, grant_id).unwrap();
+            crate::dispute::raise_dispute(
+                &env,
+                &grant,
+                0,
+                &owner,
+                String::from_str(&env, "milestone proof looks fabricated"),
+            )
+            .unwrap();
+        });
+
+        let escrow_before = env.as_contract(&contract_id, || {
+            Storage::get_escrow_account(&env, grant_id).unwrap()
+        });
+        assert_eq!(escrow_before.balance, 1000);
+        assert!(escrow_before.locked);
+
+        let reason = String::from_str(&env, "cancel");
+        let result = client.try_cancel_grant(&grant_id, &owner, &reason);
+        assert_eq!(result, Err(Ok(ContractError::EscrowLocked.into())));
+
+        // Escrow must not have been drained, and the grant must still be Active.
+        let escrow_after = env.as_contract(&contract_id, || {
+            Storage::get_escrow_account(&env, grant_id).unwrap()
+        });
+        assert_eq!(escrow_after.balance, 1000);
+
+        let grant_after = client.get_grant(&grant_id);
+        assert_eq!(grant_after.status, GrantStatus::Active);
+    }
+
+    // ── Issue #894: batch.rs wired into the public contract interface ───────
+
+    #[test]
+    fn test_batch_vote_milestones_through_public_interface() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, contract_id) = setup_test(&env);
+
+        let owner = Address::generate(&env);
+        let token = Address::generate(&env);
+        let reviewer = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(reviewer.clone());
+
+        create_grant(&env, &contract_id, 1, owner, token, reviewers);
+        create_milestone(&env, &contract_id, 1, 0, MilestoneState::Submitted);
+
+        let mut votes = Vec::new(&env);
+        votes.push_back(BatchMilestoneVote {
+            grant_id: 1,
+            milestone_idx: 0,
+            approve: true,
+            reason: None,
+        });
+
+        let result = client.batch_vote_milestones(&reviewer, &votes);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 0);
+
+        let milestone = client.get_milestone(&1u64, &0u32);
+        assert_eq!(milestone.state, MilestoneState::Approved);
+    }
+
+    #[test]
+    fn test_batch_fund_grants_through_public_interface() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _contract_id) = setup_test(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_id = token_contract.address();
+        let token_admin = token::StellarAssetClient::new(&env, &token_id);
+
+        let owner = Address::generate(&env);
+        let funder = Address::generate(&env);
+        token_admin.mint(&funder, &500);
+
+        let grant_id = create_client_grant(&env, &client, &owner, &token_id, Vec::new(&env));
+
+        let mut items = Vec::new(&env);
+        items.push_back((grant_id, 500i128));
+
+        let result = client.batch_fund_grants(&funder, &token_id, &items);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 0);
+
+        let grant = client.get_grant(&grant_id);
+        assert_eq!(grant.escrow_balance, 500);
+    }
+
+    #[test]
+    fn test_batch_cancel_grants_through_public_interface() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _contract_id) = setup_test(&env);
+
+        let owner = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        let grant_id1 = create_client_grant(&env, &client, &owner, &token, Vec::new(&env));
+        let grant_id2 = create_client_grant(&env, &client, &owner, &token, Vec::new(&env));
+
+        let mut grant_ids = Vec::new(&env);
+        grant_ids.push_back(grant_id1);
+        grant_ids.push_back(grant_id2);
+
+        let reason = String::from_str(&env, "no longer needed");
+        let result = client.batch_cancel_grants(&owner, &grant_ids, &reason);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.succeeded, 2);
+        assert_eq!(result.failed, 0);
+
+        assert_eq!(client.get_grant(&grant_id1).status, GrantStatus::Cancelled);
+        assert_eq!(client.get_grant(&grant_id2).status, GrantStatus::Cancelled);
     }
 }
