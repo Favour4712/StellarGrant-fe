@@ -177,6 +177,9 @@ pub fn refund(env: &Env, grant_id: u64, funder: &Address) -> Result<i128, Contra
     }
 
     let mut account = load_account(env, grant_id)?;
+    if account.locked {
+        return Err(ContractError::EscrowLocked);
+    }
     let actual_refund = refundable.min(account.balance);
     if actual_refund <= 0 {
         return Err(ContractError::NoRefundableAmount);
@@ -299,6 +302,9 @@ pub fn refund_partial(env: &Env, grant_id: u64, amount: i128) -> Result<(), Cont
 pub fn refund_all(env: &Env, grant_id: u64) -> Result<(), ContractError> {
     crate::reentrancy::protect(env)?;
     let account = load_account(env, grant_id)?;
+    if account.locked {
+        return Err(ContractError::EscrowLocked);
+    }
     let total_balance = account.balance;
     if total_balance == 0 {
         return Ok(());
@@ -577,6 +583,67 @@ mod tests {
 
         let ledger = Storage::get_funder_ledger(&env, grant_id, &funder).unwrap();
         assert_eq!(ledger.refunded, 500);
+    }
+
+    // Issue #890: refund/refund_all must respect the dispute lock the same
+    // way release/release_to_funders already do, so a dispute-time cancel
+    // can't drain escrow out from under an open arbitration.
+    #[test]
+    fn test_refund_rejects_when_locked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let grant_id = 1u64;
+        let (owner, _token) = setup(&env, grant_id);
+
+        let funder = Address::generate(&env);
+        let mut account = Storage::get_escrow_account(&env, grant_id).unwrap();
+        account.balance = 1000;
+        account.locked = true;
+        Storage::set_escrow_account(&env, grant_id, &account);
+
+        let ledger = FunderLedger {
+            funder: funder.clone(),
+            contributed: 500,
+            refunded: 0,
+            last_contribution_at: 0,
+        };
+        Storage::set_funder_ledger(&env, grant_id, &funder, &ledger);
+
+        let result = refund(&env, grant_id, &funder);
+        assert_eq!(result, Err(ContractError::EscrowLocked));
+
+        // Balance must be untouched.
+        let account = Storage::get_escrow_account(&env, grant_id).unwrap();
+        assert_eq!(account.balance, 1000);
+    }
+
+    #[test]
+    fn test_refund_all_rejects_when_locked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let grant_id = 1u64;
+        let (owner, _token) = setup(&env, grant_id);
+
+        let funder = Address::generate(&env);
+        let mut account = Storage::get_escrow_account(&env, grant_id).unwrap();
+        account.balance = 1000;
+        account.locked = true;
+        Storage::set_escrow_account(&env, grant_id, &account);
+
+        let ledger = FunderLedger {
+            funder: funder.clone(),
+            contributed: 1000,
+            refunded: 0,
+            last_contribution_at: 0,
+        };
+        Storage::set_funder_ledger(&env, grant_id, &funder, &ledger);
+
+        let result = refund_all(&env, grant_id);
+        assert_eq!(result, Err(ContractError::EscrowLocked));
+
+        // Balance must be untouched.
+        let account = Storage::get_escrow_account(&env, grant_id).unwrap();
+        assert_eq!(account.balance, 1000);
     }
 
     #[test]
