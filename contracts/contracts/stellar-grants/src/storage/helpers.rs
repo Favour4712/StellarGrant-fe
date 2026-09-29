@@ -1245,6 +1245,15 @@ impl Storage {
             )))
     }
 
+    pub fn remove_checklist_submission(env: &Env, grant_id: u64, milestone_idx: u32) {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Milestone(MilestoneKey::Submission(
+                grant_id,
+                milestone_idx,
+            )));
+    }
+
     pub fn set_checklist_submission(env: &Env, submission: &ChecklistSubmission) {
         let key = DataKey::Milestone(MilestoneKey::Submission(
             submission.grant_id,
