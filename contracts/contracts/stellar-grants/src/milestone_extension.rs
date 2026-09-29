@@ -1,6 +1,7 @@
 use soroban_sdk::{contractevent, Address, Env, Map, String, Vec};
 
 use crate::errors::ContractError;
+use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{ExtensionRequest, ExtensionStatus, MilestoneState};
 
@@ -186,6 +187,8 @@ pub fn vote_extension(
         Storage::set_extension_request(env, &request);
     }
 
+    Events::emit_extension_vote_cast(env, grant_id, milestone_idx, reviewer.clone(), approve);
+
     Ok(request.status)
 }
 
@@ -248,7 +251,10 @@ mod tests {
     use super::*;
     use crate::storage::Storage;
     use crate::types::{Grant, GrantStatus, Milestone, MilestoneState};
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Env, Map, String, Vec};
+    use soroban_sdk::{
+        testutils::Address as _, testutils::Events as _, testutils::Ledger as _, Env, Map, String,
+        Vec,
+    };
 
     fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
@@ -395,8 +401,18 @@ mod tests {
         request_extension(&env, &owner, 1, 0, 2000, String::from_str(&env, "reason")).unwrap();
 
         // First approve vote (need majority = 2/2 + 1 = 2)
+        let event_count_before_vote = env.events().all().events().len();
         let status = vote_extension(&env, &r1, 1, 0, true).unwrap();
         assert_eq!(status, ExtensionStatus::Pending); // Not yet majority
+        let events_after_vote = env.events().all();
+        assert_eq!(
+            events_after_vote.events().len(),
+            event_count_before_vote + 1
+        );
+        assert!(events_after_vote
+            .events()
+            .iter()
+            .any(|event| format!("{event:?}").contains("extension_vote_cast")));
 
         // Second approve vote reaches majority
         let status = vote_extension(&env, &r2, 1, 0, true).unwrap();

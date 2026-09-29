@@ -104,6 +104,16 @@ pub struct MilestoneVoted {
 
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionVoteCast {
+    pub grant_id: u64,
+    pub milestone_idx: u32,
+    pub reviewer: Address,
+    pub approve: bool,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MilestoneRejected {
     pub grant_id: u64,
     pub milestone_idx: u32,
@@ -594,6 +604,23 @@ impl Events {
             reviewer,
             approve,
             feedback,
+            timestamp: env.ledger().timestamp(),
+        };
+        event.publish(env);
+    }
+
+    pub fn emit_extension_vote_cast(
+        env: &Env,
+        grant_id: u64,
+        milestone_idx: u32,
+        reviewer: Address,
+        approve: bool,
+    ) {
+        let event = ExtensionVoteCast {
+            grant_id,
+            milestone_idx,
+            reviewer,
+            approve,
             timestamp: env.ledger().timestamp(),
         };
         event.publish(env);

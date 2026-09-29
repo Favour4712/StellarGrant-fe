@@ -95,16 +95,17 @@ pub fn get_grant_summary(
     for i in 0..grant.total_milestones {
         if let Some(ms) = Storage::get_milestone(env, grant_id, i) {
             match ms.state {
-                MilestoneState::Approved | MilestoneState::Paid => {
+                MilestoneState::Paid => {
                     milestones_completed = milestones_completed.saturating_add(1);
                     earned = earned.saturating_add(ms.amount);
-                    if ms.state == MilestoneState::Paid {
-                        let t = ms.status_updated_at;
-                        completed_at = Some(match completed_at {
-                            Some(prev) => prev.max(t),
-                            None => t,
-                        });
-                    }
+                    let t = ms.status_updated_at;
+                    completed_at = Some(match completed_at {
+                        Some(prev) => prev.max(t),
+                        None => t,
+                    });
+                }
+                MilestoneState::Approved => {
+                    milestones_completed = milestones_completed.saturating_add(1);
                 }
                 _ => {}
             }

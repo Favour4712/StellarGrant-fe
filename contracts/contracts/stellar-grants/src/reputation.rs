@@ -8,6 +8,7 @@ use crate::types::{ContractError, ContributorProfile, ReputationTier};
 
 const DELIVERY_RATE_WEIGHT_BPS: u64 = 5000;
 const EARNINGS_WEIGHT_BPS: u64 = 3000;
+const REVIEWER_SATISFACTION_WEIGHT_BPS: u64 = 2000;
 const REJECTION_PENALTY_BPS: u64 = 200;
 const MAX_SCORE: u64 = 1000;
 const EARNINGS_NORMALIZATION: i128 = 10_000_000_000;
@@ -35,11 +36,21 @@ pub fn calculate_score(profile: &ContributorProfile) -> u32 {
             .unwrap_or(0)
     };
 
+    let reviewer_satisfaction_score = if total_attempted == 0 {
+        0u64
+    } else {
+        (profile.milestones_completed as u64)
+            .saturating_mul(REVIEWER_SATISFACTION_WEIGHT_BPS)
+            .checked_div(total_attempted)
+            .unwrap_or(0)
+    };
+
     let rejection_penalty =
         (profile.milestones_rejected as u64).saturating_mul(REJECTION_PENALTY_BPS);
 
     let raw = delivery_rate_score
         .saturating_add(earnings_normalized)
+        .saturating_add(reviewer_satisfaction_score)
         .saturating_sub(rejection_penalty);
 
     let scaled = raw
@@ -149,16 +160,14 @@ mod tests {
     }
 
     #[test]
-    fn test_perfect_delivery_scores_high() {
+    fn test_perfect_profile_reaches_platinum() {
         let env = Env::default();
         let mut profile = blank_profile(&env);
         profile.milestones_completed = 10;
         profile.total_earned = EARNINGS_NORMALIZATION;
         let score = calculate_score(&profile);
-        assert!(
-            score >= 700,
-            "expected gold+ for perfect delivery, got {score}"
-        );
+        assert_eq!(score, MAX_SCORE as u32);
+        assert_eq!(tier_from_score(score), ReputationTier::Platinum);
     }
 
     #[test]
