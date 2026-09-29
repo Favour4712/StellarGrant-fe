@@ -726,3 +726,51 @@ pub fn migrate_storage_keys_v2(env: &Env) -> Result<(), ContractError> {
         .set(&DataKey::V2KeysMigrated, &true);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TransferableRole;
+    use soroban_sdk::testutils::Address as _;
+
+    // Issue #889: GrantKey::Transfer gained a TransferableRole discriminator
+    // without this migration call site being updated, so migrate_storage_keys_v2
+    // failed to compile (E0061). That compile error is already fixed upstream —
+    // this test locks in the migrated value's readability so a future edit
+    // can't silently regress it again.
+    #[test]
+    fn test_migrate_transfer_proposal_readable_after_migration() {
+        let env = Env::default();
+        let contract_id = env.register(crate::StellarGrantsContract, ());
+
+        env.as_contract(&contract_id, || {
+            let gid = 1u64;
+            let current_holder = Address::generate(&env);
+            let proposed_new_holder = Address::generate(&env);
+
+            env.storage()
+                .persistent()
+                .set(&LegacyDataKey::GrantCounter, &gid);
+
+            let proposal = crate::types::TransferProposal {
+                grant_id: gid,
+                current_holder: current_holder.clone(),
+                proposed_new_holder: proposed_new_holder.clone(),
+                role: TransferableRole::Owner,
+                reviewer_to_replace: None,
+                proposed_at: env.ledger().timestamp(),
+            };
+            env.storage()
+                .persistent()
+                .set(&LegacyDataKey::TransferProposal(gid), &proposal);
+
+            migrate_storage_keys_v2(&env).unwrap();
+
+            let migrated = Storage::get_transfer_proposal(&env, gid, &TransferableRole::Owner)
+                .expect("legacy transfer proposal should be readable after migration");
+            assert_eq!(migrated.current_holder, current_holder);
+            assert_eq!(migrated.proposed_new_holder, proposed_new_holder);
+            assert_eq!(migrated.role, TransferableRole::Owner);
+        });
+    }
+}
