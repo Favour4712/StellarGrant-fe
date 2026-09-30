@@ -25,6 +25,7 @@ mod arbitration_pool;
 mod audit;
 mod auto_approve;
 mod badge;
+mod batch;
 mod batch_read;
 mod bounty;
 mod checklist;
@@ -4811,6 +4812,37 @@ impl StellarGrantsContract {
         batch_read::grant_cards(&env, grant_ids)
     }
 
+    // ── Issue #894: Batch Operations (vote / fund / cancel) ──────────────
+
+    /// Vote on multiple milestones in one call. Reviewer only.
+    pub fn batch_vote_milestones(
+        env: Env,
+        reviewer: Address,
+        votes: Vec<BatchMilestoneVote>,
+    ) -> Result<BatchResult, ContractError> {
+        batch::batch_vote_milestones(&env, &reviewer, votes)
+    }
+
+    /// Fund multiple grants with the same token in one call. Funder only.
+    pub fn batch_fund_grants(
+        env: Env,
+        funder: Address,
+        token: Address,
+        items: Vec<(u64, i128)>,
+    ) -> Result<BatchResult, ContractError> {
+        batch::batch_fund_grants(&env, &funder, &token, items)
+    }
+
+    /// Cancel multiple grants. Admin or owner only.
+    pub fn batch_cancel_grants(
+        env: Env,
+        caller: Address,
+        grant_ids: Vec<u64>,
+        reason: String,
+    ) -> Result<BatchResult, ContractError> {
+        batch::batch_cancel_grants(&env, &caller, grant_ids, reason)
+    }
+
     // ── Issue #613: Condition-Based Milestone Fund Release ───────────────
 
     /// Attach release conditions to a milestone. Owner only, before submission.
@@ -5045,6 +5077,11 @@ fn apply_milestone_submission(
         if existing.state == MilestoneState::Submitted || existing.state == MilestoneState::Approved
         {
             return Err(ContractError::MilestoneAlreadySubmitted);
+        }
+        // Issue #898: a resubmission after rejection must not inherit the
+        // checklist approval given to the previous, rejected work.
+        if existing.state == MilestoneState::Rejected {
+            checklist::clear_submission(env, grant_id, milestone_idx);
         }
     }
 

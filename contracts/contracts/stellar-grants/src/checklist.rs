@@ -156,6 +156,12 @@ pub fn review_criterion(
     Ok(())
 }
 
+/// Drop a milestone's checklist submission so the next submission is reviewed
+/// from scratch (Issue #898).
+pub fn clear_submission(env: &Env, grant_id: u64, milestone_idx: u32) {
+    Storage::remove_checklist_submission(env, grant_id, milestone_idx);
+}
+
 pub fn all_required_approved(env: &Env, grant_id: u64, milestone_idx: u32) -> bool {
     Storage::get_checklist_submission(env, grant_id, milestone_idx)
         .map(|s| s.all_required_met)
@@ -405,5 +411,87 @@ mod tests {
             !events.events().is_empty(),
             "At least one event should be emitted"
         );
+    }
+
+    // Issue #898
+    #[test]
+    fn test_resubmission_after_rejection_clears_checklist_approval() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(StellarGrantsContract, ());
+        let owner = Address::generate(&env);
+        let reviewer = Address::generate(&env);
+
+        let evidence = || {
+            let mut e: Vec<Option<String>> = Vec::new(&env);
+            e.push_back(Some(soroban_sdk::String::from_str(&env, "proof")));
+            e
+        };
+
+        env.as_contract(&contract_id, || {
+            setup_grant(&env, &owner, &reviewer);
+
+            let mut criteria: Vec<AcceptanceCriteria> = Vec::new(&env);
+            criteria.push_back(AcceptanceCriteria {
+                idx: 0,
+                description: soroban_sdk::String::from_str(&env, "Code compiles"),
+                is_required: true,
+            });
+            define_criteria(&env, &owner, 1, 0, criteria).unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            submit_checklist(&env, &owner, 1, 0, evidence()).unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            review_criterion(&env, &reviewer, 1, 0, 0, true).unwrap();
+            assert!(all_required_approved(&env, 1, 0));
+        });
+        env.as_contract(&contract_id, || {
+            // Reviewers reject the milestone despite the passing checklist.
+            let mut milestone = crate::types::Milestone {
+                idx: 0,
+                description: soroban_sdk::String::from_str(&env, "M1"),
+                amount: 10_000,
+                state: crate::types::MilestoneState::Rejected,
+                votes: soroban_sdk::Map::new(&env),
+                approvals: 0,
+                rejections: 1,
+                reasons: soroban_sdk::Map::new(&env),
+                status_updated_at: 0,
+                proof_url: None,
+                submission_timestamp: 0,
+                deadline: None,
+                reviewer_count_snapshot: 1,
+                reviewer_list_snapshot: Vec::new(&env),
+            };
+            milestone.reviewer_list_snapshot.push_back(reviewer.clone());
+            Storage::set_milestone(&env, 1, 0, &milestone);
+        });
+        env.as_contract(&contract_id, || {
+            // Contributor resubmits different work.
+            let grant = Storage::get_grant(&env, 1).unwrap();
+            crate::apply_milestone_submission(
+                &env,
+                1,
+                &grant,
+                0,
+                soroban_sdk::String::from_str(&env, "M1 v2"),
+                soroban_sdk::String::from_str(&env, "https://example.com/v2"),
+                &owner,
+            )
+            .unwrap();
+
+            // The stale approval must not carry over.
+            assert!(!all_required_approved(&env, 1, 0));
+            assert!(get_checklist(&env, 1, 0).is_none());
+
+            // A fresh checklist submission is accepted and needs a fresh review.
+            submit_checklist(&env, &owner, 1, 0, evidence()).unwrap();
+            assert!(!all_required_approved(&env, 1, 0));
+        });
+        env.as_contract(&contract_id, || {
+            review_criterion(&env, &reviewer, 1, 0, 0, true).unwrap();
+            assert!(all_required_approved(&env, 1, 0));
+        });
     }
 }

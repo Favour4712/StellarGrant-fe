@@ -4,7 +4,7 @@ use crate::errors::ContractError;
 use crate::governance;
 use crate::governance::VoteResult;
 use crate::storage::Storage;
-use crate::types::{AutoApproveConfig, AutoApproveRecord, MilestoneState};
+use crate::types::{AutoApproveConfig, AutoApproveRecord, GrantStatus, MilestoneState};
 
 /// Configure auto-approve for a grant. Owner only.
 pub fn set_config(
@@ -20,7 +20,9 @@ pub fn set_config(
         return Err(ContractError::Unauthorized);
     }
 
-    if config.grace_period_seconds == 0 && config.min_votes_required == 0 {
+    // Issue #899: zero required votes would let any submission auto-approve
+    // with no reviewer input at all. A zero grace period stays valid.
+    if config.min_votes_required == 0 {
         return Err(ContractError::InvalidInput);
     }
 
@@ -43,6 +45,11 @@ pub fn try_auto_approve(
     }
 
     let grant = Storage::get_grant(env, grant_id).ok_or(ContractError::GrantNotFound)?;
+
+    // Issue #900: a cancelled (or otherwise inactive) grant cannot approve work.
+    if grant.status != GrantStatus::Active {
+        return Err(ContractError::InvalidState);
+    }
 
     if milestone_idx >= grant.total_milestones {
         return Err(ContractError::MilestoneIndexOutOfBounds);
@@ -133,6 +140,10 @@ pub fn can_auto_approve(env: &Env, grant_id: u64, milestone_idx: u32) -> bool {
         Some(g) => g,
         None => return false,
     };
+
+    if grant.status != GrantStatus::Active {
+        return false;
+    }
 
     if milestone_idx >= grant.total_milestones {
         return false;
@@ -445,6 +456,73 @@ mod tests {
             Storage::set_milestone(&env, grant_id, 0, &milestone);
 
             assert!(can_auto_approve(&env, grant_id, 0));
+        });
+    }
+
+    fn cfg(env: &Env, owner: &Address, grant_id: u64, min_votes: u32) -> AutoApproveConfig {
+        AutoApproveConfig {
+            grant_id,
+            enabled: true,
+            grace_period_seconds: 0,
+            min_votes_required: min_votes,
+            set_by: owner.clone(),
+            set_at: env.ledger().timestamp(),
+        }
+    }
+
+    // Issue #899
+    #[test]
+    fn test_set_config_rejects_zero_min_votes_even_with_grace_period() {
+        let (env, owner, grant_id, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            let mut config = cfg(&env, &owner, grant_id, 0);
+            config.grace_period_seconds = 3600;
+            assert_eq!(
+                set_config(&env, &owner, grant_id, config),
+                Err(ContractError::InvalidInput)
+            );
+            assert!(get_config(&env, grant_id).is_none());
+        });
+    }
+
+    // Issue #899
+    #[test]
+    fn test_set_config_accepts_positive_min_votes() {
+        let (env, owner, grant_id, contract_id) = setup();
+        env.as_contract(&contract_id, || {
+            let config = cfg(&env, &owner, grant_id, 1);
+            assert_eq!(set_config(&env, &owner, grant_id, config), Ok(()));
+            assert_eq!(get_config(&env, grant_id).unwrap().min_votes_required, 1);
+        });
+    }
+
+    // Issue #900
+    #[test]
+    fn test_auto_approve_blocked_on_cancelled_grant() {
+        let (env, owner, grant_id, contract_id) = setup();
+        let caller = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            set_config(&env, &owner, grant_id, cfg(&env, &owner, grant_id, 1)).unwrap();
+
+            let mut milestone = Storage::get_milestone_v(&env, grant_id, 0);
+            milestone.approvals = 2;
+            Storage::set_milestone(&env, grant_id, 0, &milestone);
+            assert!(can_auto_approve(&env, grant_id, 0));
+
+            let mut grant = Storage::get_grant_v(&env, grant_id);
+            grant.status = GrantStatus::Cancelled;
+            Storage::set_grant(&env, grant_id, &grant);
+
+            assert!(!can_auto_approve(&env, grant_id, 0));
+            assert_eq!(
+                try_auto_approve(&env, &caller, grant_id, 0),
+                Err(ContractError::InvalidState)
+            );
+            assert_eq!(
+                Storage::get_milestone_v(&env, grant_id, 0).state,
+                MilestoneState::Submitted
+            );
+            assert!(get_record(&env, grant_id, 0).is_none());
         });
     }
 }

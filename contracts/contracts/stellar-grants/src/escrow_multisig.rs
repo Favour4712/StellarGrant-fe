@@ -1,5 +1,6 @@
 use crate::events::Events;
 use crate::storage::keys::DataKey;
+use crate::storage::Storage;
 use crate::types::{ContractError, EscrowReleaseApproval, EscrowReleaseRequest, ProtocolConfig};
 use soroban_sdk::{Address, Env, Vec};
 
@@ -35,8 +36,19 @@ pub fn approve(
     milestone_idx: u32,
 ) -> Result<(), ContractError> {
     approver.require_auth();
-    // Use ContractError::NotFound, but wait, types.rs has ContractError::GrantNotFound or similar? We can just use ContractError::InvalidState or whatever.
-    // I'll use ContractError::InvalidState if not found since there is no EscrowRequestNotFound.
+
+    // Issue #892: only the grant's owner, one of its registered reviewers, or
+    // the global admin may cast a multisig approval — otherwise anyone
+    // controlling two throwaway keypairs could meet the default threshold of 2.
+    let grant = Storage::get_grant(env, grant_id).ok_or(ContractError::GrantNotFound)?;
+    let admin = Storage::get_global_admin(env);
+    let is_eligible = grant.owner == approver
+        || grant.reviewers.contains(approver.clone())
+        || admin == Some(approver.clone());
+    if !is_eligible {
+        return Err(ContractError::Unauthorized);
+    }
+
     let mut request =
         get_request(env, grant_id, milestone_idx).ok_or(ContractError::InvalidState)?;
 
@@ -176,6 +188,39 @@ mod tests {
         (env, grant_id, contract_id)
     }
 
+    /// Issue #892: `approve` now requires the grant's owner/reviewers/admin,
+    /// so every test that calls `approve` needs a real Grant record backing
+    /// the eligibility check.
+    fn setup_grant(
+        env: &Env,
+        contract_id: &Address,
+        grant_id: u64,
+        owner: &Address,
+        reviewers: Vec<Address>,
+    ) {
+        env.as_contract(contract_id, || {
+            let grant = crate::types::Grant {
+                id: grant_id,
+                owner: owner.clone(),
+                title: soroban_sdk::String::from_str(env, "Title"),
+                description: soroban_sdk::String::from_str(env, "Description"),
+                token: Address::generate(env),
+                status: crate::types::GrantStatus::Active,
+                total_amount: 1000,
+                milestone_amount: 1000,
+                reviewers,
+                total_milestones: 1,
+                milestones_paid_out: 0,
+                escrow_balance: 1000,
+                funders: Vec::new(env),
+                reason: None,
+                timestamp: env.ledger().timestamp(),
+                require_compliance: None,
+            };
+            Storage::set_grant(env, grant_id, &grant);
+        });
+    }
+
     #[test]
     fn test_create_request() {
         let (env, grant_id, contract_id) = setup();
@@ -196,9 +241,14 @@ mod tests {
     #[test]
     fn test_approve_accumulates() {
         let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
         let approver1 = Address::generate(&env);
         let approver2 = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver1.clone());
+        reviewers.push_back(approver2.clone());
+        setup_grant(&env, &contract_id, grant_id, &owner, reviewers);
 
         env.as_contract(&contract_id, || {
             create_request(&env, grant_id, 0, 1000, recipient).unwrap();
@@ -218,8 +268,12 @@ mod tests {
     #[test]
     fn test_duplicate_approval_rejected() {
         let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
         let approver = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver.clone());
+        setup_grant(&env, &contract_id, grant_id, &owner, reviewers);
 
         env.as_contract(&contract_id, || {
             create_request(&env, grant_id, 0, 1000, recipient).unwrap();
@@ -238,8 +292,12 @@ mod tests {
     #[test]
     fn test_execute_before_threshold_rejected() {
         let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
         let approver = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver.clone());
+        setup_grant(&env, &contract_id, grant_id, &owner, reviewers);
 
         env.as_contract(&contract_id, || {
             create_request(&env, grant_id, 0, 1000, recipient).unwrap();
@@ -254,9 +312,14 @@ mod tests {
     #[test]
     fn test_execute_already_executed_rejected() {
         let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
         let approver1 = Address::generate(&env);
         let approver2 = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver1.clone());
+        reviewers.push_back(approver2.clone());
+        setup_grant(&env, &contract_id, grant_id, &owner, reviewers);
 
         // The first `execute_release` has to succeed for the second one to be
         // rejected as already executed, so the grant needs a funded escrow
@@ -296,8 +359,12 @@ mod tests {
     #[test]
     fn test_approve_after_expiry_rejected() {
         let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
         let approver = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver.clone());
+        setup_grant(&env, &contract_id, grant_id, &owner, reviewers);
 
         env.as_contract(&contract_id, || {
             create_request(&env, grant_id, 0, 1000, recipient).unwrap();
@@ -324,6 +391,16 @@ mod tests {
         let approver1 = Address::generate(&env);
         let approver2 = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let mut reviewers = Vec::new(&env);
+        reviewers.push_back(approver1.clone());
+        reviewers.push_back(approver2.clone());
+        setup_grant(
+            &env,
+            &contract_id,
+            grant_id,
+            &Address::generate(&env),
+            reviewers,
+        );
 
         let token_admin = Address::generate(&env);
         let token_id = env
@@ -487,6 +564,35 @@ mod tests {
                 ),
                 Ok(())
             );
+        });
+    }
+
+    // Issue #892: escrow_multisig::approve() had no signer whitelist — any
+    // two throwaway addresses could together meet the default threshold of 2
+    // and force through a payout. Verify ineligible callers are rejected and
+    // never accumulate toward the threshold.
+    #[test]
+    fn test_approve_rejects_ineligible_signers() {
+        let (env, grant_id, contract_id) = setup();
+        let owner = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let outsider1 = Address::generate(&env);
+        let outsider2 = Address::generate(&env);
+        setup_grant(&env, &contract_id, grant_id, &owner, Vec::new(&env));
+
+        env.as_contract(&contract_id, || {
+            create_request(&env, grant_id, 0, 1000, recipient).unwrap();
+
+            let result = approve(&env, outsider1, grant_id, 0);
+            assert_eq!(result, Err(ContractError::Unauthorized));
+
+            let result = approve(&env, outsider2, grant_id, 0);
+            assert_eq!(result, Err(ContractError::Unauthorized));
+
+            // Neither throwaway address counted toward the multisig threshold.
+            assert!(!is_approved(&env, grant_id, 0));
+            let request = get_request(&env, grant_id, 0).unwrap();
+            assert_eq!(request.approvals.len(), 0);
         });
     }
 }
